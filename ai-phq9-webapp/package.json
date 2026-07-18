@@ -1,0 +1,10 @@
+{
+  "name": "ai-phq9-webapp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Responsive web prototype: AI-administered PHQ-9 with a key-hiding proxy.",
+  "type": "commonjs",
+  "engines": { "node": ">=18" },
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "express": "^4.19.2" }
+}

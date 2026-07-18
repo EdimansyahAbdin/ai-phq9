@@ -1,0 +1,749 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#14302e" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-title" content="PHQ-9 demo" />
+<title>AI-administered PHQ-9 — research prototype</title>
+<link rel="manifest" href="/manifest.webmanifest" />
+<link rel="apple-touch-icon" href="/icon-192.png" />
+<style>
+  html, body, #root { height: 100%; }
+  body { margin: 0; background: #eef2f0; -webkit-text-size-adjust: 100%; }
+  #boot { font-family: system-ui, -apple-system, sans-serif; color: #4a615f; padding: 44px 22px; font-size: 15px; }
+</style>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+</head>
+<body>
+<div id="root"><div id="boot">Loading the prototype…</div></div>
+<script type="text/babel" data-presets="react">
+const { useState, useRef, useEffect } = React;
+
+/*
+  AI-administered PHQ-9 — research prototype
+  Conversational (AI) vs standard self-report, live severity scoring, item-9
+  safety flagging, instant AI-generated clinical summary, optional voice input,
+  and multilingual administration (English, Malay, Mandarin, Tamil).
+  The AI interpretation, translation, and summary call the Claude API.
+  Not a medical device. Demonstration only.
+*/
+
+const C = {
+  ink: "#16302f", inkSoft: "#4a615f", bg: "#eef2f0", surface: "#ffffff",
+  line: "#d7e0dc", primary: "#1f6b63", primarySoft: "#e2efec",
+  amber: "#b9772a", amberSoft: "#f6ecdd", risk: "#a23b3b", riskSoft: "#f4e3e2",
+  s0: "#3f8f83", s1: "#6b9e57", s2: "#c08a2e", s3: "#a23b3b",
+};
+
+const LANGS = [
+  { code: "en", label: "English", native: "English", bcp47: "en-SG", asr: true },
+  { code: "ms", label: "Malay", native: "Bahasa Melayu", bcp47: "ms-MY", asr: true },
+  { code: "zh", label: "Mandarin", native: "华语", bcp47: "zh-CN", asr: true },
+  { code: "ta", label: "Tamil", native: "தமிழ்", bcp47: "ta-IN", asr: true },
+];
+
+const RESPONSES = [
+  { v: 0, label: "Not at all" },
+  { v: 1, label: "Several days" },
+  { v: 2, label: "More than half the days" },
+  { v: 3, label: "Nearly every day" },
+];
+
+const PHQ9 = [
+  { item: "Little interest or pleasure in doing things",
+    ask: "Over the past two weeks, how much interest or pleasure have you found in the things you usually enjoy?" },
+  { item: "Feeling down, depressed, or hopeless",
+    ask: "In the last two weeks, how often have you felt down, depressed, or hopeless?" },
+  { item: "Trouble falling or staying asleep, or sleeping too much",
+    ask: "How has your sleep been these past couple of weeks — trouble falling or staying asleep, or sleeping too much?" },
+  { item: "Feeling tired or having little energy",
+    ask: "How have your energy levels been lately? Have you felt tired or low on energy?" },
+  { item: "Poor appetite or overeating",
+    ask: "How has your appetite been over the past two weeks — eating much less, or more, than usual?" },
+  { item: "Feeling bad about yourself, or that you are a failure, or have let yourself or your family down",
+    ask: "In the last two weeks, how have you felt about yourself — for instance, feeling like a failure, or that you've let yourself or your family down?" },
+  { item: "Trouble concentrating on things, such as reading or watching television",
+    ask: "Have you had any trouble concentrating over the past two weeks — say, on reading or watching television?" },
+  { item: "Moving or speaking slowly, or being fidgety or restless",
+    ask: "Over the past two weeks, have you noticed yourself moving or speaking more slowly than usual — or the opposite, feeling restless and fidgety?" },
+  { item: "Thoughts that you would be better off dead, or of hurting yourself",
+    ask: "This last one can be hard to talk about, and it's okay to be honest. In the past two weeks, have you had any thoughts that you would be better off dead, or of hurting yourself in some way?" },
+];
+
+const EN_GREETING = "Hi, I'm Hannah. I'll ask you nine short questions about how you've been over the past two weeks. Answer in your own words — there are no right or wrong answers.";
+const EN_QUESTIONS = PHQ9.map((q) => q.ask);
+
+function severity(total) {
+  if (total <= 4) return { band: "Minimal", color: C.s0, note: "minimal or no symptoms" };
+  if (total <= 9) return { band: "Mild", color: C.s1, note: "mild symptoms" };
+  if (total <= 14) return { band: "Moderate", color: C.s2, note: "moderate symptoms" };
+  if (total <= 19) return { band: "Moderately severe", color: "#b0632a", note: "moderately severe symptoms" };
+  return { band: "Severe", color: C.s3, note: "severe symptoms" };
+}
+function scoreColor(v) { return [C.s0, C.s1, C.s2, C.s3][v] || C.line; }
+
+function extractJSON(text) {
+  if (!text) return null;
+  let t = text.replace(/```json/gi, "").replace(/```/g, "").trim();
+  const s = t.indexOf("{"), e = t.lastIndexOf("}");
+  if (s >= 0 && e > s) t = t.slice(s, e + 1);
+  try { return JSON.parse(t); } catch (_) { return null; }
+}
+
+async function callClaude(system, messages) {
+  const res = await fetch("/api/message", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ system, messages }),
+  });
+  if (!res.ok) throw new Error("API " + res.status);
+  const data = await res.json();
+  return (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
+}
+
+const SCORE_SYSTEM =
+  "You are Hannah, a research assistant administering the PHQ-9 depression screener in a demonstration. " +
+  "The patient is answering about ONE symptom domain over the LAST TWO WEEKS. " +
+  "Map their free-text reply to the standard PHQ-9 frequency score: 0 = not at all, 1 = several days, " +
+  "2 = more than half the days, 3 = nearly every day. If the reply is genuinely too vague to map, set " +
+  "needClarify true and give one brief, warm clarifying question. Watch for any indication of self-harm or " +
+  "suicidal thoughts and set riskDetected accordingly. Give a short, warm acknowledgment (max one sentence) " +
+  "that never diagnoses. Return ONLY a JSON object, no markdown, with keys: score (integer 0-3 or null), " +
+  "rationale (short string), needClarify (boolean), clarifyQuestion (string or null), riskDetected (boolean), " +
+  "acknowledgment (string).";
+
+const SUMMARY_SYSTEM =
+  "You are generating an instant, standardized clinical summary from a completed PHQ-9 for CLINICIAN REVIEW in a " +
+  "research demonstration. Do NOT diagnose and do NOT prescribe or name specific medications. Write the summary in " +
+  "English. Given the item scores, total, severity band, administration language, and safety status, write a concise " +
+  "structured summary with these labeled lines: 'Symptom profile:', 'Severity:', 'Safety note:', and " +
+  "'For clinician review:' (screening-level, non-prescriptive considerations only). Keep under 180 words, plain text.";
+
+function App() {
+  const [screen, setScreen] = useState("intro");
+  const [lang, setLang] = useState("en");
+  const [loc, setLoc] = useState({ greeting: EN_GREETING, questions: EN_QUESTIONS });
+  const [preparing, setPreparing] = useState(false);
+  const [scores, setScores] = useState(Array(9).fill(null));
+  const [rationales, setRationales] = useState(Array(9).fill(null));
+  const [idx, setIdx] = useState(0);
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [clarified, setClarified] = useState(false);
+  const [safety, setSafety] = useState(false);
+  const [summary, setSummary] = useState(null);
+  const [summaryBusy, setSummaryBusy] = useState(false);
+  const [listening, setListening] = useState(false);
+  const [micError, setMicError] = useState(null);
+  const [consent, setConsent] = useState(false);
+  const [shareMsg, setShareMsg] = useState(null);
+  const chatEnd = useRef(null);
+  const recRef = useRef(null);
+  const [isMobile, setIsMobile] = useState(typeof window !== "undefined" && window.matchMedia ? window.matchMedia("(max-width: 760px)").matches : false);
+  useEffect(() => {
+    if (!window.matchMedia) return;
+    const mq = window.matchMedia("(max-width: 760px)");
+    const on = () => setIsMobile(mq.matches);
+    mq.addEventListener ? mq.addEventListener("change", on) : mq.addListener(on);
+    return () => { mq.removeEventListener ? mq.removeEventListener("change", on) : mq.removeListener(on); };
+  }, []);
+  const [installEvt, setInstallEvt] = useState(null);
+  const [showA2HS, setShowA2HS] = useState(true);
+  const [isStandalone, setIsStandalone] = useState(false);
+  const topLevel = typeof window !== "undefined" && window.self === window.top;
+  const isIOS = typeof navigator !== "undefined" && /iphone|ipad|ipod/i.test(navigator.userAgent || "");
+  useEffect(() => {
+    const onBIP = (e) => { e.preventDefault(); setInstallEvt(e); };
+    window.addEventListener("beforeinstallprompt", onBIP);
+    const sa = (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || (typeof navigator !== "undefined" && navigator.standalone === true);
+    setIsStandalone(!!sa);
+    const onInstalled = () => setShowA2HS(false);
+    window.addEventListener("appinstalled", onInstalled);
+    return () => { window.removeEventListener("beforeinstallprompt", onBIP); window.removeEventListener("appinstalled", onInstalled); };
+  }, []);
+  async function doInstall() {
+    if (!installEvt) return;
+    installEvt.prompt();
+    try { await installEvt.userChoice; } catch (_) {}
+    setInstallEvt(null); setShowA2HS(false);
+  }
+
+  const langObj = LANGS.find((l) => l.code === lang);
+
+  useEffect(() => { if (chatEnd.current) chatEnd.current.scrollIntoView({ behavior: "smooth" }); }, [messages, busy]);
+
+  function reset() {
+    if (recRef.current) { try { recRef.current.stop(); } catch (_) {} }
+    setScores(Array(9).fill(null)); setRationales(Array(9).fill(null));
+    setIdx(0); setMessages([]); setInput(""); setBusy(false); setError(null);
+    setClarified(false); setSafety(false); setSummary(null);
+    setLoc({ greeting: EN_GREETING, questions: EN_QUESTIONS }); setListening(false);
+    setMicError(null); setConsent(false); setShareMsg(null); setScreen("intro");
+  }
+
+  async function translateAll(lo) {
+    const sys = "You are translating a mental-health screening script into " + lo.label + " (" + lo.native + "). " +
+      "Return ONLY JSON, no markdown, with keys 'greeting' (string) and 'questions' (array of exactly 9 strings), " +
+      "using natural, warm, clinically appropriate phrasing a patient would understand. Preserve each PHQ-9 item's " +
+      "meaning and its two-week timeframe.";
+    const payload = { greeting: EN_GREETING, questions: EN_QUESTIONS };
+    const out = await callClaude(sys, [{ role: "user", content: JSON.stringify(payload) }]);
+    const parsed = extractJSON(out);
+    if (parsed && parsed.greeting && Array.isArray(parsed.questions) && parsed.questions.length === 9) return parsed;
+    return null;
+  }
+
+  async function startConvo() {
+    setScreen("convo");
+    let L = { greeting: EN_GREETING, questions: EN_QUESTIONS };
+    if (lang !== "en") {
+      setPreparing(true);
+      try { const t = await translateAll(langObj); if (t) L = t; else setError("Couldn't localize the script; showing English."); }
+      catch (_) { setError("Translation call failed; showing English."); }
+      setPreparing(false);
+    }
+    setLoc(L);
+    setMessages([{ role: "liv", text: L.greeting }, { role: "liv", text: L.questions[0] }]);
+  }
+
+  async function generateSummary(finalScores, flagged) {
+    setSummaryBusy(true);
+    const total = finalScores.reduce((a, b) => a + (b || 0), 0);
+    const sev = severity(total);
+    const payload = {
+      items: PHQ9.map((q, i) => ({ domain: q.item, score: finalScores[i] })),
+      total, severityBand: sev.band, item9Score: finalScores[8],
+      administrationLanguage: langObj.label, safetyFlag: flagged,
+    };
+    try {
+      const out = await callClaude(SUMMARY_SYSTEM, [{ role: "user", content: "Completed PHQ-9 data:\n" + JSON.stringify(payload, null, 2) }]);
+      setSummary(out.trim());
+    } catch (_) {
+      setSummary(null);
+      setError("Couldn't generate the AI summary (model call failed). Scores and severity above are computed locally and remain valid.");
+    } finally { setSummaryBusy(false); }
+  }
+
+  async function submitAnswer() {
+    const reply = input.trim();
+    if (!reply || busy) return;
+    if (recRef.current) { try { recRef.current.stop(); } catch (_) {} }
+    setError(null);
+    setMessages((m) => [...m, { role: "patient", text: reply }]);
+    setInput(""); setBusy(true);
+    const current = PHQ9[idx];
+    const sys = SCORE_SYSTEM + " The patient is answering in " + langObj.label +
+      "; interpret their reply in that language and write 'acknowledgment' and 'clarifyQuestion' in " + langObj.label + ".";
+    try {
+      const out = await callClaude(sys, [{ role: "user", content:
+        "Symptom domain: \"" + current.item + "\"\nPatient reply: \"" + reply + "\"\n" +
+        (clarified ? "You already asked one clarifying question; you must assign a score now." : "") }]);
+      const parsed = extractJSON(out);
+      if (!parsed) { setMessages((m) => [...m, { role: "liv", text: "Sorry — could you say a little more about that?" }]); setBusy(false); return; }
+
+      const risk = !!parsed.riskDetected;
+      if (parsed.needClarify && !clarified) {
+        setClarified(true);
+        setMessages((m) => [...m, { role: "liv", text: parsed.clarifyQuestion || "Could you tell me a bit more?" }]);
+        if (risk) setSafety(true); setBusy(false); return;
+      }
+      let sc = Number.isInteger(parsed.score) ? parsed.score : 0;
+      sc = Math.max(0, Math.min(3, sc));
+      const newScores = scores.slice(); newScores[idx] = sc; setScores(newScores);
+      const newRats = rationales.slice(); newRats[idx] = parsed.rationale || ""; setRationales(newRats);
+      const flagged = risk || (idx === 8 && sc > 0) || safety;
+      if (flagged) setSafety(true);
+      setMessages((m) => [...m, { role: "liv", text: parsed.acknowledgment || "Thank you.", chip: sc }]);
+
+      if (idx < 8) {
+        const next = idx + 1; setIdx(next); setClarified(false);
+        setTimeout(() => { setMessages((m) => [...m, { role: "liv", text: loc.questions[next] }]); }, 450);
+        setBusy(false);
+      } else {
+        setBusy(false);
+        setTimeout(() => {
+          setMessages((m) => [...m, { role: "liv", text: "That's all nine. Let me pull together a summary." }]);
+          setScreen("results"); generateSummary(newScores, flagged);
+        }, 500);
+      }
+    } catch (_) { setError("The model call failed. Check the connection and try sending again."); setBusy(false); }
+  }
+
+  async function toggleMic() {
+    if (!langObj.asr) { setMicError("Voice input isn't available for " + langObj.label + ". Please type instead."); return; }
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { setMicError("This browser doesn't support speech recognition — Chrome or Edge works best. Please type instead."); return; }
+    if (listening) { try { recRef.current && recRef.current.stop(); } catch (_) {} return; }
+
+    // Explicitly request mic permission first — this fires the browser prompt,
+    // which SpeechRecognition often fails to trigger on its own inside a frame.
+    try {
+      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach((t) => t.stop());
+      }
+    } catch (err) {
+      const blocked = err && (err.name === "NotAllowedError" || err.name === "SecurityError");
+      setMicError(blocked
+        ? "Microphone is blocked in this in-chat preview. Open the artifact in its own browser tab (the expand / pop-out control at the top of this panel), allow the mic when prompted, and it will work. Or just type your answer."
+        : "No microphone was found. Check that a mic is connected, or type your answer.");
+      return;
+    }
+
+    try {
+      const rec = new SR();
+      rec.lang = langObj.bcp47; rec.interimResults = true; rec.continuous = false;
+      rec.onresult = (e) => { let t = ""; for (let i = 0; i < e.results.length; i++) t += e.results[i][0].transcript; setInput(t); };
+      rec.onerror = (e) => {
+        setListening(false);
+        const code = e && e.error;
+        if (code === "not-allowed" || code === "service-not-allowed") {
+          setMicError("Microphone access was denied. Open the artifact in its own browser tab (the expand / pop-out control), allow the mic, and retry — or type instead.");
+        } else if (code === "no-speech") {
+          setMicError("Didn't catch any speech — tap the mic and try again.");
+        } else if (code === "audio-capture") {
+          setMicError("No microphone detected. Check your mic, or type instead.");
+        } else if (code === "network") {
+          setMicError("Speech recognition needs a network connection and it couldn't reach the service. Try again, or type instead.");
+        } else {
+          setMicError("Microphone error (" + code + "). Try again, or type instead.");
+        }
+      };
+      rec.onend = () => setListening(false);
+      recRef.current = rec; rec.start(); setListening(true); setMicError(null);
+    } catch (_) { setMicError("Couldn't start the microphone — please type instead."); setListening(false); }
+  }
+
+  function buildReport() {
+    const sev = severity(total);
+    const rows = scores.map((s, i) => (i + 1) + ". " + PHQ9[i].item + " — " + (s === null ? "not scored" : s));
+    const lines = [
+      "PHQ-9 SCREENING SUMMARY (research demonstration — not a diagnosis)",
+      "Generated: " + new Date().toLocaleString(),
+      "Administration language: " + langObj.label,
+      "Total score: " + total + "/27 — " + sev.band,
+      "",
+      "Item scores:",
+      ...rows,
+    ];
+    if (safety) lines.push("", "⚑ SAFETY FLAG: item 9 endorsed — clinician review advised.");
+    lines.push("", "Clinical summary (for clinician review):", summary || "(AI summary unavailable.)");
+    lines.push("", "Consent given by respondent to forward this summary for clinician review.");
+    lines.push("Demonstration only — not a medical device. In distress: SOS 1767 · mindline.sg.");
+    return lines.join("\n");
+  }
+
+  function sendWhatsApp() {
+    if (!consent) return;
+    const url = "https://wa.me/?text=" + encodeURIComponent(buildReport());
+    let w = null;
+    try { w = window.open(url, "_blank", "noopener"); } catch (_) {}
+    if (!w) setShareMsg("The in-chat preview blocked the popup. Open the artifact in its own tab (pop-out control) and try again, or use Print / Save as PDF.");
+    else setShareMsg("Opening WhatsApp — choose the clinician and send. (For a real study, use a secure, consent-compliant channel instead.)");
+  }
+
+  function printReport() {
+    if (!consent) return;
+    setShareMsg(null);
+    setTimeout(() => {
+      try { window.print(); }
+      catch (_) { setShareMsg("The print dialog was blocked here. Open the artifact in its own tab (pop-out control), then Print / Save as PDF."); }
+    }, 60);
+  }
+
+  function setFormScore(i, v) { const ns = scores.slice(); ns[i] = v; setScores(ns); if (i === 8 && v > 0) setSafety(true); }
+  function submitForm() { const flagged = scores[8] > 0; if (flagged) setSafety(true); setScreen("results"); generateSummary(scores, flagged); }
+
+  const total = scores.reduce((a, b) => a + (b || 0), 0);
+  const sev = severity(total);
+  const answered = scores.filter((s) => s !== null).length;
+
+  const styleTag = (
+    <style>{`
+      @import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
+      .liv-root * { box-sizing: border-box; }
+      .liv-root { font-family: 'IBM Plex Sans', system-ui, sans-serif; color: ${C.ink}; }
+      .liv-display { font-family: 'Instrument Serif', Georgia, serif; font-weight: 400; letter-spacing: -0.01em; }
+      .liv-mono { font-family: 'IBM Plex Mono', monospace; }
+      .liv-btn { cursor: pointer; border: none; transition: all .15s ease; font-family: 'IBM Plex Sans', sans-serif; }
+      .liv-btn:focus-visible { outline: 2px solid ${C.primary}; outline-offset: 2px; }
+      .liv-card { background: ${C.surface}; border: 1px solid ${C.line}; }
+      .liv-modecard:hover { border-color: ${C.primary}; transform: translateY(-2px); }
+      .liv-modecard { transition: all .18s ease; }
+      .liv-resp:hover { border-color: ${C.primary}; }
+      @keyframes livIn { from { opacity: 0; transform: translateY(6px);} to { opacity: 1; transform: none;} }
+      @keyframes livPulse { 0%,100% { opacity: 1;} 50% { opacity: .35;} }
+      .liv-msg { animation: livIn .28s ease both; }
+      .liv-listening { animation: livPulse 1s ease infinite; }
+      .liv-printable { display: none; }
+      @media (prefers-reduced-motion: reduce) { .liv-msg, .liv-modecard, .liv-listening { animation: none; transition: none; } }
+      @media print {
+        .liv-noprint { display: none !important; }
+        .liv-printable { display: block !important; padding: 28px; font-family: 'IBM Plex Sans', system-ui, sans-serif; color: #16302f; }
+        .liv-printable h2 { font-family: 'Instrument Serif', Georgia, serif; font-weight: 400; font-size: 26px; margin: 0 0 4px; }
+        .liv-printable hr { border: none; border-top: 1px solid #d7e0dc; margin: 14px 0; }
+        .liv-printable .row { font-size: 12.5px; line-height: 1.6; margin: 2px 0; }
+      }
+    `}</style>
+  );
+
+  const badge = (
+    <span className="liv-mono" style={{ fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase",
+      color: C.amber, background: C.amberSoft, padding: "4px 9px", borderRadius: 4, whiteSpace: "nowrap" }}>Research prototype</span>
+  );
+
+  const disclaimer = (
+    <div className="liv-mono" style={{ fontSize: 11.5, color: C.inkSoft, lineHeight: 1.6 }}>
+      Demonstration only · not a medical device · not for clinical decision-making or patient care.
+      PHQ-9 is in the public domain. If you are in distress, contact Samaritans of Singapore (SOS) 24-hour hotline 1767, or mindline.sg.
+    </div>
+  );
+
+  // INTRO
+  if (screen === "intro") {
+    return (
+      <div className="liv-root" style={{ background: C.bg, minHeight: "100%", padding: "40px 22px" }}>
+        {styleTag}
+        <div style={{ maxWidth: 780, margin: "0 auto" }}>
+          {isMobile && topLevel && !isStandalone && showA2HS && (
+            <div className="liv-card" style={{ borderRadius: 12, padding: 13, marginBottom: 18, background: C.primarySoft, borderColor: C.primary, display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ fontSize: 18 }}>📲</span>
+              <div style={{ flex: 1, fontSize: 12.5, color: C.ink, lineHeight: 1.45 }}>
+                {installEvt
+                  ? "Add this to your home screen for an app-like experience."
+                  : isIOS
+                    ? "Add to Home Screen: tap the Share icon, then “Add to Home Screen”."
+                    : "Add to Home Screen: open your browser menu, then “Add to Home screen” or “Install”."}
+              </div>
+              {installEvt && (
+                <button className="liv-btn" onClick={doInstall} style={{ background: C.primary, color: "#fff", borderRadius: 8, padding: "7px 13px", fontSize: 12.5, fontWeight: 600, whiteSpace: "nowrap" }}>Install</button>
+              )}
+              <button className="liv-btn" onClick={() => setShowA2HS(false)} aria-label="Dismiss" style={{ background: "none", color: C.inkSoft, fontSize: 18, padding: "0 4px", lineHeight: 1 }}>×</button>
+            </div>
+          )}
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 22 }}>
+            {badge}
+            <span className="liv-mono" style={{ fontSize: 11.5, color: C.inkSoft, letterSpacing: "0.04em" }}>patient-reported outcome measures</span>
+          </div>
+          <h1 className="liv-display" style={{ fontSize: isMobile ? 32 : 52, lineHeight: 1.02, margin: "0 0 16px" }}>
+            An AI-administered <span style={{ fontStyle: "italic", color: C.primary }}>PHQ-9</span>
+          </h1>
+          <p style={{ fontSize: 16.5, lineHeight: 1.6, color: C.inkSoft, maxWidth: 620, margin: "0 0 26px" }}>
+            A working demonstration of what an AI screening platform does at its core: it administers the measure
+            conversationally, interprets free-text (typed or spoken) answers into item scores, tracks severity live,
+            flags high-risk responses, and produces an instant clinical summary for review.
+          </p>
+
+          <div style={{ marginBottom: 22 }}>
+            <div className="liv-mono" style={{ fontSize: 11, letterSpacing: "0.06em", textTransform: "uppercase", color: C.inkSoft, marginBottom: 10 }}>Administration language</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {LANGS.map((l) => (
+                <button key={l.code} className="liv-btn" onClick={() => { setLang(l.code); setMicError(null); }}
+                  style={{ borderRadius: 999, padding: "8px 15px", fontSize: 13.5,
+                    border: "1px solid " + (lang === l.code ? C.primary : C.line),
+                    background: lang === l.code ? C.primary : C.surface,
+                    color: lang === l.code ? "#fff" : C.ink, fontWeight: lang === l.code ? 600 : 400 }}>
+                  {l.label} <span style={{ opacity: 0.7 }}>· {l.native}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14, marginBottom: 20 }}>
+            <button className="liv-btn liv-card liv-modecard" onClick={startConvo}
+              style={{ textAlign: "left", padding: 20, borderRadius: 12, background: C.surface }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                <span style={{ width: 8, height: 8, borderRadius: 8, background: C.primary, display: "inline-block" }} />
+                <span style={{ fontWeight: 600, fontSize: 15 }}>Conversational (AI)</span>
+              </div>
+              <div style={{ fontSize: 13.5, color: C.inkSoft, lineHeight: 1.55 }}>
+                Hannah interviews you — by text or voice — and maps your answers to scores in real time. The arm whose
+                measurement properties your study would validate.
+              </div>
+            </button>
+            <button className="liv-btn liv-card liv-modecard" onClick={() => setScreen("form")}
+              style={{ textAlign: "left", padding: 20, borderRadius: 12, background: C.surface }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                <span style={{ width: 8, height: 8, borderRadius: 8, background: C.inkSoft, display: "inline-block" }} />
+                <span style={{ fontWeight: 600, fontSize: 15 }}>Standard form</span>
+              </div>
+              <div style={{ fontSize: 13.5, color: C.inkSoft, lineHeight: 1.55 }}>
+                The classic fixed-response self-report — the comparator arm for measurement-equivalence testing.
+              </div>
+            </button>
+          </div>
+
+          <div className="liv-mono" style={{ fontSize: 11.5, color: C.inkSoft, marginBottom: 18 }}>
+            Voice input uses the browser's speech recognition (Chrome/Edge) for English, Malay, Mandarin, and Tamil. If
+            the mic is blocked in this in-chat preview, open the artifact in its own tab using the pop-out control above.
+          </div>
+          <div style={{ borderTop: "1px solid " + C.line, paddingTop: 18 }}>{disclaimer}</div>
+        </div>
+      </div>
+    );
+  }
+
+  // SHARED PANEL
+  const panel = (
+    <div className="liv-card" style={{ borderRadius: 12, padding: 18, background: C.surface, position: isMobile ? "static" : "sticky", top: 16 }}>
+      <div className="liv-mono" style={{ fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: C.inkSoft, marginBottom: 14 }}>Instrument panel</div>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 4 }}>
+        <span className="liv-mono" style={{ fontSize: 34, fontWeight: 500, color: sev.color }}>{total}</span>
+        <span className="liv-mono" style={{ fontSize: 15, color: C.inkSoft }}>/ 27</span>
+      </div>
+      <div style={{ fontSize: 13.5, fontWeight: 600, color: sev.color, marginBottom: 4 }}>{sev.band}</div>
+      <div style={{ height: 6, background: C.bg, borderRadius: 6, overflow: "hidden", marginBottom: 16 }}>
+        <div style={{ width: (total / 27 * 100) + "%", height: "100%", background: sev.color, transition: "width .4s ease" }} />
+      </div>
+      {safety && (
+        <div style={{ background: C.riskSoft, border: "1px solid " + C.risk, borderRadius: 8, padding: 10, marginBottom: 14 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 600, color: C.risk, marginBottom: 3 }}>⚑ Safety flag raised</div>
+          <div style={{ fontSize: 11.5, color: C.ink, lineHeight: 1.5 }}>Risk-item response detected. In deployment this routes to a clinician for immediate review.</div>
+        </div>
+      )}
+      <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+        {PHQ9.map((q, i) => (
+          <div key={i} style={{ display: "flex", alignItems: "center", gap: 9 }}>
+            <span className="liv-mono" style={{ width: 22, height: 22, borderRadius: 5, flexShrink: 0,
+              display: "flex", alignItems: "center", justifyContent: "center",
+              background: scores[i] === null ? C.bg : scoreColor(scores[i]),
+              color: scores[i] === null ? C.inkSoft : "#fff", fontSize: 12, fontWeight: 600 }}>
+              {scores[i] === null ? "·" : scores[i]}
+            </span>
+            <span style={{ fontSize: 11.5, color: scores[i] === null ? C.inkSoft : C.ink, lineHeight: 1.35, fontWeight: i === 8 ? 600 : 400 }}>
+              {i === 8 ? "Self-harm / risk item" : q.item.length > 42 ? q.item.slice(0, 40) + "…" : q.item}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+
+  // CONVERSATIONAL
+  if (screen === "convo") {
+    return (
+      <div className="liv-root" style={{ background: C.bg, minHeight: "100%", padding: "22px 18px" }}>
+        {styleTag}
+        <div style={{ maxWidth: 940, margin: "0 auto" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 18, flexWrap: "wrap" }}>
+            {badge}
+            <span className="liv-display" style={{ fontSize: 22 }}>Conversational administration</span>
+            <span className="liv-mono" style={{ fontSize: 11.5, color: C.inkSoft, background: C.primarySoft, padding: "3px 9px", borderRadius: 5 }}>{langObj.label} · {langObj.native}</span>
+            <button className="liv-btn" onClick={reset} style={{ marginLeft: "auto", fontSize: 12.5, color: C.inkSoft, background: "none", padding: "6px 4px" }}>Start over</button>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "minmax(0,1fr) 250px", gap: 16 }}>
+            <div className="liv-card" style={{ borderRadius: 12, background: C.surface, display: "flex", flexDirection: "column", height: isMobile ? 460 : 520 }}>
+              <div style={{ flex: 1, overflowY: "auto", padding: 18, display: "flex", flexDirection: "column", gap: 12 }}>
+                {preparing && <div className="liv-msg" style={{ fontSize: 13, color: C.inkSoft, fontStyle: "italic" }}>Preparing the {langObj.label} script…</div>}
+                {messages.map((m, i) => (
+                  <div key={i} className="liv-msg" style={{ display: "flex", justifyContent: m.role === "patient" ? "flex-end" : "flex-start" }}>
+                    <div style={{ maxWidth: "82%", padding: "10px 14px", borderRadius: 12, fontSize: 14, lineHeight: 1.5,
+                      background: m.role === "patient" ? C.primary : C.primarySoft, color: m.role === "patient" ? "#fff" : C.ink,
+                      borderBottomRightRadius: m.role === "patient" ? 3 : 12, borderBottomLeftRadius: m.role === "patient" ? 12 : 3 }}>
+                      {m.text}
+                      {typeof m.chip === "number" && (
+                        <span className="liv-mono" style={{ display: "inline-block", marginLeft: 8, fontSize: 11, fontWeight: 600,
+                          color: "#fff", background: scoreColor(m.chip), borderRadius: 4, padding: "1px 6px" }}>scored {m.chip}</span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+                {busy && <div className="liv-msg" style={{ fontSize: 13, color: C.inkSoft, fontStyle: "italic" }}>Hannah is interpreting…</div>}
+                <div ref={chatEnd} />
+              </div>
+
+              {(error || micError) && <div style={{ padding: "8px 14px", fontSize: 12.5, color: C.risk, background: C.riskSoft }}>{micError || error}</div>}
+
+              <div style={{ borderTop: "1px solid " + C.line, padding: 12, display: "flex", gap: 8, alignItems: "center" }}>
+                <button onClick={toggleMic} disabled={busy || preparing} title={langObj.asr ? "Speak your answer" : "Voice not available for " + langObj.label}
+                  className={"liv-btn" + (listening ? " liv-listening" : "")}
+                  style={{ width: 42, height: 42, borderRadius: 10, flexShrink: 0, fontSize: 18,
+                    background: listening ? C.risk : (langObj.asr ? C.primarySoft : C.bg),
+                    color: listening ? "#fff" : (langObj.asr ? C.primary : C.inkSoft),
+                    opacity: langObj.asr ? 1 : 0.6 }}>
+                  {listening ? "■" : "🎤"}
+                </button>
+                <input value={input} onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submitAnswer(); } }}
+                  placeholder={listening ? "Listening…" : "Answer in your own words…"} disabled={busy || preparing}
+                  style={{ flex: 1, border: "1px solid " + C.line, borderRadius: 8, padding: "10px 12px", fontSize: 14,
+                    fontFamily: "'IBM Plex Sans', sans-serif", color: C.ink, outline: "none" }} />
+                <button className="liv-btn" onClick={submitAnswer} disabled={busy || preparing || !input.trim()}
+                  style={{ background: input.trim() && !busy && !preparing ? C.primary : C.line, color: "#fff",
+                    borderRadius: 8, padding: "0 18px", height: 42, fontSize: 14, fontWeight: 500 }}>Send</button>
+              </div>
+            </div>
+            <div>{panel}</div>
+          </div>
+          <div style={{ marginTop: 16 }}>{disclaimer}</div>
+        </div>
+      </div>
+    );
+  }
+
+  // STANDARD FORM
+  if (screen === "form") {
+    return (
+      <div className="liv-root" style={{ background: C.bg, minHeight: "100%", padding: "22px 18px" }}>
+        {styleTag}
+        <div style={{ maxWidth: 940, margin: "0 auto" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
+            {badge}
+            <span className="liv-display" style={{ fontSize: 22 }}>Standard self-report</span>
+            <button className="liv-btn" onClick={reset} style={{ marginLeft: "auto", fontSize: 12.5, color: C.inkSoft, background: "none", padding: "6px 4px" }}>Start over</button>
+          </div>
+          <p style={{ fontSize: 13.5, color: C.inkSoft, margin: "0 0 18px" }}>Over the last two weeks, how often have you been bothered by any of the following?</p>
+          <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "minmax(0,1fr) 250px", gap: 16, alignItems: "start" }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {PHQ9.map((q, i) => (
+                <div key={i} className="liv-card" style={{ borderRadius: 10, padding: 14, borderColor: i === 8 ? C.risk : C.line }}>
+                  <div style={{ fontSize: 14, marginBottom: 10, fontWeight: i === 8 ? 600 : 400 }}>
+                    <span className="liv-mono" style={{ color: C.inkSoft, marginRight: 8 }}>{i + 1}</span>{q.item}
+                  </div>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    {RESPONSES.map((r) => (
+                      <button key={r.v} className="liv-btn liv-resp" onClick={() => setFormScore(i, r.v)}
+                        style={{ borderRadius: 7, padding: "7px 11px", fontSize: 12.5,
+                          border: "1px solid " + (scores[i] === r.v ? scoreColor(r.v) : C.line),
+                          background: scores[i] === r.v ? scoreColor(r.v) : C.surface,
+                          color: scores[i] === r.v ? "#fff" : C.inkSoft, fontWeight: scores[i] === r.v ? 600 : 400 }}>{r.label}</button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+              <button className="liv-btn" onClick={submitForm} disabled={answered < 9}
+                style={{ marginTop: 6, background: answered === 9 ? C.primary : C.line, color: "#fff", borderRadius: 9, padding: "13px", fontSize: 14.5, fontWeight: 600 }}>
+                {answered === 9 ? "Generate summary" : "Answer all items (" + answered + "/9)"}
+              </button>
+            </div>
+            <div>{panel}</div>
+          </div>
+          <div style={{ marginTop: 16 }}>{disclaimer}</div>
+        </div>
+      </div>
+    );
+  }
+
+  // RESULTS
+  return (
+    <div className="liv-root" style={{ background: C.bg, minHeight: "100%", padding: "34px 18px" }}>
+      {styleTag}
+
+      <div className="liv-printable">
+        <h2>PHQ-9 screening summary</h2>
+        <div className="row">Research demonstration — not a diagnosis or medical device.</div>
+        <div className="row">Generated: {new Date().toLocaleString()} · Administration language: {langObj.label}</div>
+        <hr />
+        <div className="row"><strong>Total score: {total} / 27 — {sev.band}</strong></div>
+        <div className="row" style={{ marginTop: 8 }}>Item scores:</div>
+        {PHQ9.map((q, i) => (
+          <div className="row" key={i}>{i + 1}. {q.item} — {scores[i] === null ? "not scored" : scores[i]}</div>
+        ))}
+        {safety && <div className="row" style={{ color: "#a23b3b", fontWeight: 600, marginTop: 8 }}>⚑ Safety flag: item 9 endorsed — clinician review advised.</div>}
+        <hr />
+        <div className="row" style={{ fontWeight: 600 }}>Clinical summary (for clinician review):</div>
+        <div className="row" style={{ whiteSpace: "pre-wrap" }}>{summary || "AI summary unavailable."}</div>
+        <hr />
+        <div className="row" style={{ fontSize: 11 }}>Consent given by the respondent to forward this summary for clinician review. Demonstration only. In distress: SOS 1767 · mindline.sg.</div>
+      </div>
+
+      <div className="liv-noprint" style={{ maxWidth: 780, margin: "0 auto" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 22 }}>
+          {badge}
+          <span className="liv-display" style={{ fontSize: 24 }}>Instant summary</span>
+          <button className="liv-btn" onClick={reset} style={{ marginLeft: "auto", fontSize: 13, color: "#fff", background: C.primary, borderRadius: 8, padding: "8px 14px" }}>Run again</button>
+        </div>
+
+        <div className="liv-card" style={{ borderRadius: 14, padding: 24, marginBottom: 16, display: "flex", gap: 26, alignItems: "center", flexWrap: "wrap" }}>
+          <div>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+              <span className="liv-mono" style={{ fontSize: 56, fontWeight: 500, color: sev.color, lineHeight: 1 }}>{total}</span>
+              <span className="liv-mono" style={{ fontSize: 18, color: C.inkSoft }}>/ 27</span>
+            </div>
+            <div style={{ fontSize: 16, fontWeight: 600, color: sev.color, marginTop: 6 }}>{sev.band}</div>
+            <div style={{ fontSize: 12.5, color: C.inkSoft }}>PHQ-9 · {sev.note} · {langObj.label}</div>
+          </div>
+          <div style={{ flex: 1, minWidth: 220 }}>
+            <div style={{ display: "flex", gap: 3, marginBottom: 8 }}>
+              {PHQ9.map((q, i) => (
+                <div key={i} title={q.item + " — " + scores[i]} style={{ flex: 1, height: 34, borderRadius: 4,
+                  background: scoreColor(scores[i] || 0), opacity: scores[i] ? 1 : 0.3,
+                  display: "flex", alignItems: "flex-end", justifyContent: "center", paddingBottom: 2 }}>
+                  <span className="liv-mono" style={{ fontSize: 10, color: "#fff" }}>{i + 1}</span>
+                </div>
+              ))}
+            </div>
+            <div className="liv-mono" style={{ fontSize: 10.5, color: C.inkSoft, letterSpacing: "0.03em" }}>item-level scores (0–3)</div>
+          </div>
+        </div>
+
+        {safety && (
+          <div className="liv-card" style={{ borderRadius: 12, padding: 18, marginBottom: 16, background: C.riskSoft, borderColor: C.risk }}>
+            <div style={{ fontSize: 14.5, fontWeight: 600, color: C.risk, marginBottom: 6 }}>⚑ Safety flag — item 9 endorsed</div>
+            <div style={{ fontSize: 13, color: C.ink, lineHeight: 1.6 }}>
+              A response on the self-harm item was detected. In a deployed system this triggers an immediate clinician
+              review pathway rather than proceeding automatically. Support: Samaritans of Singapore (SOS) 24-hour hotline
+              1767 · mindline.sg · IMH Mental Health Helpline 6389 2222.
+            </div>
+          </div>
+        )}
+
+        <div className="liv-card" style={{ borderRadius: 12, padding: 20, marginBottom: 16 }}>
+          <div className="liv-mono" style={{ fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: C.inkSoft, marginBottom: 12 }}>AI clinical summary · for review</div>
+          {summaryBusy ? <div style={{ fontSize: 13.5, color: C.inkSoft, fontStyle: "italic" }}>Generating summary…</div>
+            : summary ? <div style={{ fontSize: 13.8, lineHeight: 1.65, color: C.ink, whiteSpace: "pre-wrap" }}>{summary}</div>
+            : <div style={{ fontSize: 13, color: C.inkSoft, lineHeight: 1.6 }}>{error || "Summary unavailable. Scores above are computed locally and remain valid."}</div>}
+        </div>
+
+        <div className="liv-card" style={{ borderRadius: 12, padding: 20, marginBottom: 16 }}>
+          <div className="liv-mono" style={{ fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: C.inkSoft, marginBottom: 12 }}>Forward for clinician review</div>
+          <div onClick={() => setConsent(!consent)} style={{ display: "flex", gap: 10, alignItems: "flex-start", cursor: "pointer", marginBottom: 14 }}>
+            <span style={{ width: 20, height: 20, borderRadius: 5, flexShrink: 0, marginTop: 1,
+              border: "1.5px solid " + (consent ? C.primary : C.line), background: consent ? C.primary : C.surface,
+              color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13 }}>{consent ? "✓" : ""}</span>
+            <span style={{ fontSize: 13.5, color: C.ink, lineHeight: 1.5 }}>
+              I consent to forwarding this screening summary to a clinician for review.
+            </span>
+          </div>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <button className="liv-btn" onClick={sendWhatsApp} disabled={!consent}
+              style={{ background: consent ? "#25813f" : C.line, color: "#fff", borderRadius: 9, padding: "11px 18px", fontSize: 14, fontWeight: 600 }}>
+              Send via WhatsApp
+            </button>
+            <button className="liv-btn" onClick={printReport} disabled={!consent}
+              style={{ background: consent ? C.primary : C.line, color: "#fff", borderRadius: 9, padding: "11px 18px", fontSize: 14, fontWeight: 600 }}>
+              Print / Save as PDF
+            </button>
+          </div>
+          {shareMsg && <div style={{ fontSize: 12.5, color: C.inkSoft, marginTop: 12, lineHeight: 1.55 }}>{shareMsg}</div>}
+          <div style={{ fontSize: 11.5, color: C.inkSoft, marginTop: 12, lineHeight: 1.55, borderTop: "1px solid " + C.line, paddingTop: 10 }}>
+            WhatsApp is included here for demonstration only. Patient-reported outcomes contain health data, so a fielded
+            study would forward through a consent-compliant, secure channel — not consumer messaging.
+          </div>
+        </div>
+
+        <div style={{ fontSize: 12, color: C.inkSoft, lineHeight: 1.6, borderTop: "1px solid " + C.line, paddingTop: 16 }}>
+          <strong style={{ color: C.ink }}>How this maps to the study.</strong> The conversational arm's free-text-to-score
+          mapping — across typed and spoken input, in each language — is what Aim 1 (measurement equivalence) validates
+          against the standard-form arm; interpretation of idiomatic and multilingual replies is Aim 2; the item-9 flag
+          and escalation pathway are Aim 3.
+        </div>
+        <div style={{ marginTop: 16 }}>{disclaimer}</div>
+      </div>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
+
+</script>
+</body>
+</html>
